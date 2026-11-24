@@ -10,9 +10,10 @@ from fpdf import FPDF
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- ВАШИ ДАННЫЕ ---
-TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E"
-ADMIN_ID = 7014970015  # ВАШ ID
-BAKER_ID = 8596668517 # ID пекаря
+# ВСТАВЬ СЮДА НОВЫЙ ТОКЕН, КОТОРЫЙ ДАСТ BOTFATHER ПОСЛЕ /revoke
+TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E" 
+ADMIN_ID = 7014970015  # Твой ID
+BAKER_ID = 8596668517  # ID пекаря
 
 # --- СКЛАД ---
 INGREDIENTS = {
@@ -35,62 +36,50 @@ RECIPES = {
     "Сосиска шпаж.": {"Мука": 0.005, "Сосиски": 1.0, "Панировка": 0.01, "Шпажки": 1.0},
 }
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (СОЗДАЕТСЯ С НУЛЯ И ПУСТАЯ) ---
 def init_db():
     conn = sqlite3.connect("bakery.db")
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS products
+    
+    c.execute("DROP TABLE IF EXISTS products")
+    c.execute("DROP TABLE IF EXISTS stores")
+    c.execute("DROP TABLE IF EXISTS store_products")
+    c.execute("DROP TABLE IF EXISTS shipments")
+    c.execute("DROP TABLE IF EXISTS leftovers")
+    
+    c.execute("""CREATE TABLE products
                  (id INTEGER PRIMARY KEY, name TEXT, cost REAL, opt_price REAL, retail_price REAL)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS stores
+    c.execute("""CREATE TABLE stores
                  (id INTEGER PRIMARY KEY, name TEXT, address TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS store_products
+    c.execute("""CREATE TABLE store_products
                  (store_name TEXT, product_name TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS shipments
+    c.execute("""CREATE TABLE shipments
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS leftovers
+    c.execute("""CREATE TABLE leftovers
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
     
-    c.execute("SELECT count(*) FROM products")
-    if c.fetchone()[0] == 0:
-        prods = [
-            ("Булочка сгущ.", 4.69, 15, 20),
-            ("Хлеб дом.", 50, 0, 60),
-            ("Хлеб обыч.", 40, 0, 50),
-            ("Пончики", 25, 0, 50),
-            ("Пицца", 17.76, 55, 70),
-            ("Сосиска в тесте", 9.94, 25, 35),
-            ("Бургер", 60, 85, 100),
-            ("Сосиска шпаж.", 13.23, 0, 30),
-        ]
-        c.executemany("INSERT INTO products (name, cost, opt_price, retail_price) VALUES (?,?,?,?)", prods)
-        
-    c.execute("SELECT count(*) FROM stores")
-    if c.fetchone()[0] == 0:
-        stores = [("Магазин 1", "ул. Ленина 1"), ("Магазин 2", "ул. Пушкина 2"), ("Своя точка", "Пекарня")]
-        c.executemany("INSERT INTO stores (name, address) VALUES (?,?)", stores)
-        
     conn.commit()
     conn.close()
 
 def get_db():
     return sqlite3.connect("bakery.db")
 
-# --- МЕНЮ ---
+# --- ГЛАВНОЕ МЕНЮ ---
 def main_menu_kb(is_admin=False):
     kb = [
         [InlineKeyboardButton("📦 Отгрузить товар (Водитель)", callback_data="ship")],
-        [InlineKeyboardButton("📊 Ввести остаток (Магазины)", callback_data="left")],
+        [InlineKeyboardButton("📊 Ввести остаток", callback_data="left")],
         [InlineKeyboardButton("📚 Склад (Сырье)", callback_data="warehouse")],
         [InlineKeyboardButton("🚚 Закуп (Приход)", callback_data="purchase")],
     ]
     if is_admin:
-        kb.append([InlineKeyboardButton("💰 Отчеты и Статистика", callback_data="report_menu")])
+        kb.append([InlineKeyboardButton("📈 Статистика", callback_data="stats_menu")])
         kb.append([InlineKeyboardButton("⚙️ Админка", callback_data="admin_menu")])
     return InlineKeyboardMarkup(kb)
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_admin = (update.effective_user.id == ADMIN_ID)
-    await update.message.reply_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
+    await update.message.reply_text("🥖 Главное меню (База очищена, всё начинается с нуля):", reply_markup=main_menu_kb(is_admin))
 
 async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -98,18 +87,85 @@ async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_admin = (q.from_user.id == ADMIN_ID)
     await q.edit_message_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
 
-# --- ОТЧЕТЫ ---
-async def report_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# --- СТАТИСТИКА ---
+async def stats_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     kb = [
-        [InlineKeyboardButton("📅 За сегодня (PDF)", callback_data="rep_today")],
-        [InlineKeyboardButton("📅 За вчера (PDF)", callback_data="rep_yesterday")],
-        [InlineKeyboardButton("📅 За неделю (PDF)", callback_data="rep_week")],
-        [InlineKeyboardButton("📅 За месяц (PDF)", callback_data="rep_month")],
+        [InlineKeyboardButton("📊 На экране (Сегодня)", callback_data="stat_view_today")],
+        [InlineKeyboardButton("📊 На экране (За неделю)", callback_data="stat_view_week")],
+        [InlineKeyboardButton("📊 На экране (За месяц)", callback_data="stat_view_month")],
+        [InlineKeyboardButton("📄 Скачать PDF (Сегодня)", callback_data="rep_today")],
+        [InlineKeyboardButton("📄 Скачать PDF (За неделю)", callback_data="rep_week")],
         [InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]
     ]
-    await q.edit_message_text("Выбери период для отчета:", reply_markup=InlineKeyboardMarkup(kb))
+    await q.edit_message_text("📈 Выбери формат статистики:", reply_markup=InlineKeyboardMarkup(kb))
 
+async def show_stats_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_date: str, end_date: str, title: str):
+    q = update.callback_query
+    conn = get_db(); c = conn.cursor()
+    
+    total_revenue = 0
+    total_profit = 0
+    text = f"📈 Статистика: {title}\n({start_date} - {end_date})\n\n"
+    
+    c.execute("SELECT DISTINCT store FROM shipments WHERE date BETWEEN ? AND ?", (start_date, end_date))
+    stores = [r[0] for r in c.fetchall()]
+    
+    if not stores:
+        text += "Пока нет данных за этот период."
+    else:
+        for store in stores:
+            text += f"📍 {store}\n"
+            store_rev = 0
+            store_prof = 0
+            
+            c.execute("SELECT DISTINCT product FROM shipments WHERE store=? AND date BETWEEN ? AND ?", (store, start_date, end_date))
+            prods = [r[0] for r in c.fetchall()]
+            for prod in prods:
+                c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
+                shipped = c.fetchone()[0] or 0
+                c.execute("SELECT SUM(qty) FROM leftovers WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
+                left = c.fetchone()[0] or 0
+                sold = shipped - left
+                
+                if sold > 0:
+                    c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
+                    res = c.fetchone()
+                    if res:
+                        cost, opt, ret = res
+                        price = ret if store == "Своя точка" else opt
+                        rev = sold * price
+                        prof = sold * (price - cost)
+                        store_rev += rev
+                        store_prof += prof
+                        text += f"  • {prod}: {sold} шт = {rev:.0f} ₽ (прибыль {prof:.0f} ₽)\n"
+            
+            text += f"  Итого: {store_rev:.0f} ₽\n\n"
+            total_revenue += store_rev
+            total_profit += store_prof
+            
+        text += f"━━━━━━━━━━━━━━━━━━\n"
+        text += f"💰 ВЫРУЧКА: {total_revenue:.0f} ₽\n"
+        text += f"📈 ПРИБЫЛЬ: {total_profit:.0f} ₽"
+    
+    conn.close()
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="stats_menu")]]))
+
+async def stat_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    today = str(date.today())
+    await show_stats_text(update, ctx, today, today, "За сегодня")
+
+async def stat_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    start = str(date.today() - timedelta(days=7))
+    end = str(date.today())
+    await show_stats_text(update, ctx, start, end, "За неделю")
+
+async def stat_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    start = str(date.today() - timedelta(days=30))
+    end = str(date.today())
+    await show_stats_text(update, ctx, start, end, "За месяц")
+
+# --- PDF ОТЧЕТ ---
 async def generate_pdf_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_date: str, end_date: str, title: str):
     q = update.callback_query
     await q.edit_message_text("⏳ Собираю данные и создаю PDF...")
@@ -128,10 +184,8 @@ async def generate_pdf_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE, st
         for prod in prods:
             c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
             shipped = c.fetchone()[0] or 0
-            
             c.execute("SELECT SUM(qty) FROM leftovers WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
             left = c.fetchone()[0] or 0
-            
             sold = shipped - left
             if sold > 0:
                 c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
@@ -188,25 +242,16 @@ async def generate_pdf_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE, st
     
     await q.message.reply_document(document=open(filename, "rb"), caption=f"💰 Отчет: {title}")
     os.remove(filename)
-    await q.edit_message_text("✅ PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="report_menu")]]))
+    await q.edit_message_text("✅ PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="stats_menu")]]))
 
 async def report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     today = str(date.today())
     await generate_pdf_report(update, ctx, today, today, "За сегодня")
 
-async def report_yesterday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    yesterday = str(date.today() - timedelta(days=1))
-    await generate_pdf_report(update, ctx, yesterday, yesterday, "За вчера")
-
 async def report_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     start = str(date.today() - timedelta(days=7))
     end = str(date.today())
     await generate_pdf_report(update, ctx, start, end, "За неделю")
-
-async def report_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    start = str(date.today() - timedelta(days=30))
-    end = str(date.today())
-    await generate_pdf_report(update, ctx, start, end, "За месяц")
 
 # --- ОТГРУЗКА ---
 async def ship_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -215,6 +260,9 @@ async def ship_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     c.execute("SELECT name, address FROM stores")
     stores = c.fetchall()
     conn.close()
+    if not stores:
+        await q.edit_message_text("Сначала добавь магазины в Админке!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
+        return
     kb = [[InlineKeyboardButton(f"{s[0]} ({s[1]})", callback_data=f"shipstore_{s[0]}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")])
     await q.edit_message_text("Выбери точку:", reply_markup=InlineKeyboardMarkup(kb))
@@ -309,6 +357,9 @@ async def left_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     c.execute("SELECT name, address FROM stores")
     stores = c.fetchall()
     conn.close()
+    if not stores:
+        await q.edit_message_text("Сначала добавь магазины в Админке!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
+        return
     kb = [[InlineKeyboardButton(f"{s[0]}", callback_data=f"leftstore_{s[0]}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")])
     await q.edit_message_text("Где вводим остаток?", reply_markup=InlineKeyboardMarkup(kb))
@@ -332,6 +383,10 @@ async def show_left_keyboard(q, ctx):
     data = ctx.user_data.get("leftover", {})
     prods = ctx.user_data["left_products"]
     
+    if not prods:
+        await q.edit_message_text("В этом магазине нет товаров.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
+        return
+
     kb = []
     for name in prods:
         qty = data.get(name, "—")
@@ -415,6 +470,9 @@ async def admin_edit_prod_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     c.execute("SELECT name FROM products")
     prods = [r[0] for r in c.fetchall()]
     conn.close()
+    if not prods:
+        await q.edit_message_text("Товаров нет.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
+        return
     kb = [[InlineKeyboardButton(p, callback_data=f"editprod_{p}")] for p in prods]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
     await q.edit_message_text("Выбери товар для редактирования:", reply_markup=InlineKeyboardMarkup(kb))
@@ -425,6 +483,9 @@ async def admin_edit_store_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     c.execute("SELECT name, address FROM stores")
     stores = c.fetchall()
     conn.close()
+    if not stores:
+        await q.edit_message_text("Магазинов нет.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
+        return
     kb = [[InlineKeyboardButton(f"{s[0]}", callback_data=f"editstore_{s[0]}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
     await q.edit_message_text("Выбери магазин для редактирования:", reply_markup=InlineKeyboardMarkup(kb))
@@ -443,13 +504,15 @@ async def select_edit_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["admin_state"] = "edit_store_name"
     await q.edit_message_text(f"Магазин «{store}».\nВведи НОВОЕ название (или напиши то же самое):")
 
-# --- ПРИВЯЗКА ТОВАРОВ ---
 async def admin_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     conn = get_db(); c = conn.cursor()
     c.execute("SELECT name FROM stores")
     stores = [r[0] for r in c.fetchall()]
     conn.close()
+    if not stores:
+        await q.edit_message_text("Сначала добавь магазины.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
+        return
     kb = [[InlineKeyboardButton(s, callback_data=f"linkstore_{s}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
     await q.edit_message_text("Выбери магазин:", reply_markup=InlineKeyboardMarkup(kb))
@@ -468,6 +531,10 @@ async def show_link_keyboard(q, ctx):
     c.execute("SELECT product_name FROM store_products WHERE store_name=?", (store,))
     linked = [r[0] for r in c.fetchall()]
     conn.close()
+    
+    if not prods:
+        await q.edit_message_text("Сначала добавь товары.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_link")]]))
+        return
     
     kb = []
     for p in prods:
@@ -646,12 +713,13 @@ def main():
     app.add_handler(CallbackQueryHandler(purchase_menu, pattern="^purchase$"))
     app.add_handler(CallbackQueryHandler(select_purchase, pattern="^buy_"))
     
-    # Отчеты
-    app.add_handler(CallbackQueryHandler(report_menu, pattern="^report_menu$"))
+    # Статистика и отчеты
+    app.add_handler(CallbackQueryHandler(stats_menu, pattern="^stats_menu$"))
+    app.add_handler(CallbackQueryHandler(stat_today, pattern="^stat_view_today$"))
+    app.add_handler(CallbackQueryHandler(stat_week, pattern="^stat_view_week$"))
+    app.add_handler(CallbackQueryHandler(stat_month, pattern="^stat_view_month$"))
     app.add_handler(CallbackQueryHandler(report_today, pattern="^rep_today$"))
-    app.add_handler(CallbackQueryHandler(report_yesterday, pattern="^rep_yesterday$"))
     app.add_handler(CallbackQueryHandler(report_week, pattern="^rep_week$"))
-    app.add_handler(CallbackQueryHandler(report_month, pattern="^rep_month$"))
     
     # Админка
     app.add_handler(CallbackQueryHandler(admin_menu, pattern="^admin_menu$"))
