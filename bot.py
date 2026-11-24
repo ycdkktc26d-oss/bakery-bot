@@ -14,7 +14,7 @@ TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E"
 ADMIN_ID = 7014970015  # ВАШ ID
 BAKER_ID = 8596668517 # ID пекаря
 
-# --- СКЛАД (Изначально ПУСТОЙ) ---
+# --- СКЛАД ---
 INGREDIENTS = {
     "Мука": {"qty": 0.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 45.0},
     "Сахар": {"qty": 0.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 50.0},
@@ -28,11 +28,12 @@ INGREDIENTS = {
     "Шпажки": {"qty": 0.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 100.0},
 }
 
+# --- РЕЦЕПТЫ (исправлена сосиска на шпажке) ---
 RECIPES = {
     "Булочка сгущ.": {"Мука": 0.05, "Сахар": 0.01, "Дрожжи": 0.001, "Маргарин": 0.004, "Сгущенка": 0.01},
     "Пицца": {"Мука": 0.1, "Сосиски": 0.5, "Сыр": 0.025, "Томат": 0.005},
     "Сосиска в тесте": {"Мука": 0.05, "Сосиски": 1.0},
-    "Сосиска шпаж.": {"Мука": 0.1, "Сосиски": 1.0, "Панировка": 0.01, "Шпажки": 1.0},
+    "Сосиска шпаж.": {"Мука": 0.005, "Сосиски": 1.0, "Панировка": 0.01, "Шпажки": 1.0},
 }
 
 # --- БАЗА ДАННЫХ ---
@@ -84,7 +85,7 @@ def main_menu_kb(is_admin=False):
         [InlineKeyboardButton("🚚 Закуп (Приход)", callback_data="purchase")],
     ]
     if is_admin:
-        kb.append([InlineKeyboardButton("💰 Прибыль и Выручка (PDF)", callback_data="profit_pdf")])
+        kb.append([InlineKeyboardButton("💰 Отчеты и Статистика", callback_data="report_menu")])
         kb.append([InlineKeyboardButton("⚙️ Админка", callback_data="admin_menu")])
     return InlineKeyboardMarkup(kb)
 
@@ -97,6 +98,116 @@ async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     is_admin = (q.from_user.id == ADMIN_ID)
     await q.edit_message_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
+
+# --- ОТЧЕТЫ И СТАТИСТИКА ---
+async def report_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    kb = [
+        [InlineKeyboardButton("📅 За сегодня (PDF)", callback_data="rep_today")],
+        [InlineKeyboardButton("📅 За вчера (PDF)", callback_data="rep_yesterday")],
+        [InlineKeyboardButton("📅 За неделю (PDF)", callback_data="rep_week")],
+        [InlineKeyboardButton("📅 За месяц (PDF)", callback_data="rep_month")],
+        [InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]
+    ]
+    await q.edit_message_text("Выбери период для отчета:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def generate_pdf_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_date: str, end_date: str, title: str):
+    q = update.callback_query
+    conn = get_db(); c = conn.cursor()
+    
+    total_revenue = 0
+    total_profit = 0
+    rows = []
+    
+    c.execute("SELECT DISTINCT store FROM shipments WHERE date BETWEEN ? AND ?", (start_date, end_date))
+    stores = [r[0] for r in c.fetchall()]
+    
+    for store in stores:
+        c.execute("SELECT DISTINCT product FROM shipments WHERE store=? AND date BETWEEN ? AND ?", (store, start_date, end_date))
+        prods = [r[0] for r in c.fetchall()]
+        for prod in prods:
+            c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
+            shipped = c.fetchone()[0] or 0
+            
+            c.execute("SELECT SUM(qty) FROM leftovers WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
+            left = c.fetchone()[0] or 0
+            
+            sold = shipped - left
+            if sold > 0:
+                c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
+                res = c.fetchone()
+                if res:
+                    cost, opt, ret = res
+                    price = ret if store == "Своя точка" else opt
+                    rev = sold * price
+                    prof = sold * (price - cost)
+                    total_revenue += rev
+                    total_profit += prof
+                    rows.append((store, prod, sold, rev, prof))
+    conn.close()
+    
+    font_path = "DejaVuSans.ttf"
+    if not os.path.exists(font_path):
+        url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+        r = requests.get(url, verify=False)
+        with open(font_path, "wb") as f:
+            f.write(r.content)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("DejaVu", "", font_path, uni=True)
+    pdf.set_font("DejaVu", size=16)
+    pdf.cell(0, 10, f"Отчет: {title}", ln=True, align='C')
+    pdf.ln(5)
+    pdf.set_font("DejaVu", size=10)
+    pdf.cell(0, 10, f"Период: {start_date} - {end_date}", ln=True, align='C')
+    pdf.ln(10)
+    
+    pdf.set_font("DejaVu", size=9)
+    pdf.cell(35, 8, "Точка", 1)
+    pdf.cell(45, 8, "Товар", 1)
+    pdf.cell(15, 8, "Шт", 1)
+    pdf.cell(35, 8, "Выручка", 1)
+    pdf.cell(35, 8, "Прибыль", 1)
+    pdf.ln()
+    
+    for r in rows:
+        pdf.cell(35, 8, str(r[0])[:15], 1)
+        pdf.cell(45, 8, str(r[1])[:20], 1)
+        pdf.cell(15, 8, str(r[2]), 1)
+        pdf.cell(35, 8, f"{r[3]:.0f} руб", 1)
+        pdf.cell(35, 8, f"{r[4]:.0f} руб", 1)
+        pdf.ln()
+        
+    pdf.ln(10)
+    pdf.set_font("DejaVu", size=12)
+    pdf.cell(0, 10, f"ВЫРУЧКА: {total_revenue:.0f} руб", ln=True)
+    pdf.cell(0, 10, f"ЧИСТАЯ ПРИБЫЛЬ: {total_profit:.0f} руб", ln=True)
+    
+    filename = f"report_{start_date}_{end_date}.pdf"
+    pdf.output(filename)
+    
+    await q.message.reply_document(document=open(filename, "rb"), caption=f"💰 Отчет: {title}")
+    os.remove(filename)
+    await q.edit_message_text("PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="report_menu")]]))
+
+async def report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    today = str(date.today())
+    await generate_pdf_report(update, ctx, today, today, "За сегодня")
+
+async def report_yesterday(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    yesterday = str(date.today() - timedelta(days=1))
+    await generate_pdf_report(update, ctx, yesterday, yesterday, "За вчера")
+
+async def report_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    start = str(date.today() - timedelta(days=7))
+    end = str(date.today())
+    await generate_pdf_report(update, ctx, start, end, "За неделю")
+
+async def report_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    start = str(date.today() - timedelta(days=30))
+    end = str(date.today())
+    await generate_pdf_report(update, ctx, start, end, "За месяц")
 
 # --- ОТГРУЗКА ---
 async def ship_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -192,7 +303,7 @@ async def select_purchase(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pack = INGREDIENTS[ing]['pack_name']
     await q.edit_message_text(f"Сколько {ing} привезли? (в {pack}ах)")
 
-# --- ОСТАТКИ (НОВЫЙ ФОРМАТ) ---
+# --- ОСТАТКИ ---
 async def left_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     conn = get_db(); c = conn.cursor()
@@ -261,93 +372,20 @@ async def save_leftovers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         if sold > 0:
             c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
-            cost, opt, ret = c.fetchone()
-            price = ret if store == "Своя точка" else opt
-            rev = sold * price
-            prof = sold * (price - cost)
-            total_rev += rev
-            total_prof += prof
-            text += f"• {prod}: продано {sold} шт = {rev:.0f} руб (прибыль {prof:.0f} руб)\n"
+            res = c.fetchone()
+            if res:
+                cost, opt, ret = res
+                price = ret if store == "Своя точка" else opt
+                rev = sold * price
+                prof = sold * (price - cost)
+                total_rev += rev
+                total_prof += prof
+                text += f"• {prod}: продано {sold} шт = {rev:.0f} руб (прибыль {prof:.0f} руб)\n"
             
     conn.commit(); conn.close()
     text += f"\n💰 Выручка: {total_rev:.0f} руб\n📈 Прибыль: {total_prof:.0f} руб"
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
     ctx.user_data.clear()
-
-# --- ПРИБЫЛЬ В PDF ---
-async def profit_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    today = str(date.today())
-    conn = get_db(); c = conn.cursor()
-    
-    total_revenue = 0
-    total_profit = 0
-    rows = []
-    
-    c.execute("SELECT DISTINCT store FROM shipments WHERE date=?", (today,))
-    stores = [r[0] for r in c.fetchall()]
-    
-    for store in stores:
-        c.execute("SELECT DISTINCT product FROM shipments WHERE store=? AND date=?", (store, today))
-        prods = [r[0] for r in c.fetchall()]
-        for prod in prods:
-            c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date=?", (store, prod, today))
-            shipped = c.fetchone()[0] or 0
-            c.execute("SELECT SUM(qty) FROM leftovers WHERE store=? AND product=? AND date=?", (store, prod, today))
-            left = c.fetchone()[0] or 0
-            sold = shipped - left
-            if sold > 0:
-                c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
-                cost, opt, ret = c.fetchone()
-                price = ret if store == "Своя точка" else opt
-                rev = sold * price
-                prof = sold * (price - cost)
-                total_revenue += rev
-                total_profit += prof
-                rows.append((store, prod, sold, rev, prof))
-    conn.close()
-    
-    font_path = "DejaVuSans.ttf"
-    if not os.path.exists(font_path):
-        url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
-        r = requests.get(url, verify=False)
-        with open(font_path, "wb") as f:
-            f.write(r.content)
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.add_font("DejaVu", "", font_path, uni=True)
-    pdf.set_font("DejaVu", size=16)
-    pdf.cell(0, 10, f"Отчет за {today}", ln=True, align='C')
-    pdf.ln(10)
-    
-    pdf.set_font("DejaVu", size=10)
-    pdf.cell(40, 10, "Точка", 1)
-    pdf.cell(50, 10, "Товар", 1)
-    pdf.cell(20, 10, "Шт", 1)
-    pdf.cell(40, 10, "Выручка", 1)
-    pdf.cell(40, 10, "Прибыль", 1)
-    pdf.ln()
-    
-    for r in rows:
-        pdf.cell(40, 10, str(r[0]), 1)
-        pdf.cell(50, 10, str(r[1]), 1)
-        pdf.cell(20, 10, str(r[2]), 1)
-        pdf.cell(40, 10, f"{r[3]:.0f} руб", 1)
-        pdf.cell(40, 10, f"{r[4]:.0f} руб", 1)
-        pdf.ln()
-        
-    pdf.ln(10)
-    pdf.set_font("DejaVu", size=12)
-    pdf.cell(0, 10, f"ВЫРУЧКА: {total_revenue:.0f} руб", ln=True)
-    pdf.cell(0, 10, f"ЧИСТАЯ ПРИБЫЛЬ: {total_profit:.0f} руб", ln=True)
-    
-    filename = f"report_{today}.pdf"
-    pdf.output(filename)
-    
-    await q.message.reply_document(document=open(filename, "rb"), caption="💰 Отчет")
-    os.remove(filename)
-    await q.edit_message_text("PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
 
 # --- АДМИНКА ---
 async def admin_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -524,7 +562,14 @@ def main():
     app.add_handler(CallbackQueryHandler(warehouse_menu, pattern="^warehouse$"))
     app.add_handler(CallbackQueryHandler(purchase_menu, pattern="^purchase$"))
     app.add_handler(CallbackQueryHandler(select_purchase, pattern="^buy_"))
-    app.add_handler(CallbackQueryHandler(profit_pdf, pattern="^profit_pdf$"))
+    
+    # Отчеты
+    app.add_handler(CallbackQueryHandler(report_menu, pattern="^report_menu$"))
+    app.add_handler(CallbackQueryHandler(report_today, pattern="^rep_today$"))
+    app.add_handler(CallbackQueryHandler(report_yesterday, pattern="^rep_yesterday$"))
+    app.add_handler(CallbackQueryHandler(report_week, pattern="^rep_week$"))
+    app.add_handler(CallbackQueryHandler(report_month, pattern="^rep_month$"))
+    
     app.add_handler(CallbackQueryHandler(admin_menu, pattern="^admin_menu$"))
     app.add_handler(CallbackQueryHandler(admin_add_prod, pattern="^admin_add_prod$"))
     app.add_handler(CallbackQueryHandler(admin_add_store, pattern="^admin_add_store$"))
