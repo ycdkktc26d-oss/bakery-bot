@@ -14,20 +14,15 @@ BAKER_ID = 8596668517 # ID пекаря
 def init_db():
     conn = sqlite3.connect("bakery.db")
     c = conn.cursor()
-    # Таблица продуктов
     c.execute("""CREATE TABLE IF NOT EXISTS products
                  (id INTEGER PRIMARY KEY, name TEXT, cost REAL, opt_price REAL, retail_price REAL, in_stores INTEGER)""")
-    # Таблица магазинов
     c.execute("""CREATE TABLE IF NOT EXISTS stores
                  (id INTEGER PRIMARY KEY, name TEXT, address TEXT)""")
-    # Отгрузки
     c.execute("""CREATE TABLE IF NOT EXISTS shipments
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
-    # Остатки
     c.execute("""CREATE TABLE IF NOT EXISTS leftovers
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
     
-    # Начальные данные (если база пустая)
     c.execute("SELECT count(*) FROM products")
     if c.fetchone()[0] == 0:
         prods = [
@@ -125,7 +120,6 @@ async def show_ship_keyboard(q, ctx):
     
     kb = []
     for name, in_stores in prods:
-        # В свою точку возим товары с in_stores=0, в магазины с in_stores=1
         if (store == "Своя точка" and in_stores == 0) or (store != "Своя точка" and in_stores == 1):
             qty = data.get(name, 0)
             kb.append([InlineKeyboardButton(f"{name}: {qty} шт", callback_data=f"add_{name}")])
@@ -171,7 +165,7 @@ async def warehouse_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text += f"• {name}: {data['qty']:.2f} {data['unit']}\n"
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
 
-# --- ЗАКУП (Умный) ---
+# --- ЗАКУП ---
 async def purchase_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     kb = []
@@ -237,8 +231,6 @@ async def save_leftovers(q, ctx):
 # --- ПРИБЫЛЬ В PDF ---
 async def profit_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    
-    # Считаем за сегодня
     today = str(date.today())
     conn = get_db(); c = conn.cursor()
     
@@ -269,7 +261,6 @@ async def profit_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 rows.append((store, prod, sold, price, rev, prof))
     conn.close()
     
-    # Создаем PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -309,6 +300,7 @@ async def admin_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     kb = [
         [InlineKeyboardButton("➕ Добавить товар", callback_data="admin_add_prod")],
+        [InlineKeyboardButton("✏️ Изменить цены", callback_data="admin_edit_prices")],
         [InlineKeyboardButton("➕ Добавить магазин", callback_data="admin_add_store")],
         [InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]
     ]
@@ -324,44 +316,73 @@ async def admin_add_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["admin_state"] = "add_store_name"
     await q.edit_message_text("Введи НАЗВАНИЕ магазина:")
 
+async def admin_edit_prices(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT name FROM products")
+    prods = [row[0] for row in c.fetchall()]
+    conn.close()
+    
+    kb = [[InlineKeyboardButton(p, callback_data=f"editprod_{p}")] for p in prods]
+    kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
+    await q.edit_message_text("Выбери товар для изменения цен:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def select_edit_product(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    prod = q.data.replace("editprod_", "")
+    ctx.user_data["edit_prod"] = prod
+    ctx.user_data["admin_state"] = "edit_prod_cost"
+    await q.edit_message_text(f"Товар: {prod}\nВведи НОВУЮ СЕБЕСТОИМОСТЬ:")
+
 # --- ОБРАБОТЧИК ТЕКСТА ---
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.replace(",", ".")
     
-    # Админка - товары
+    # Админка - добавление товара
     if ctx.user_data.get("admin_state") == "add_prod_name":
-        ctx.user_data["new_prod_name"] = text
-        ctx.user_data["admin_state"] = "add_prod_cost"
-        await update.message.reply_text("Введи СЕБЕСТОИМОСТЬ (например, 10.5):")
-        return
-    elif ctx.user_data.get("admin_state") == "add_prod_cost":
-        ctx.user_data["new_prod_cost"] = float(text)
-        ctx.user_data["admin_state"] = "add_prod_opt"
-        await update.message.reply_text("Введи ОПТОВУЮ цену:")
-        return
-    elif ctx.user_data.get("admin_state") == "add_prod_opt":
-        ctx.user_data["new_prod_opt"] = float(text)
-        ctx.user_data["admin_state"] = "add_prod_retail"
-        await update.message.reply_text("Введи РОЗНИЧНУЮ цену:")
-        return
-    elif ctx.user_data.get("admin_state") == "add_prod_retail":
-        retail = float(text)
-        name = ctx.user_data["new_prod_name"]
-        cost = ctx.user_data["new_prod_cost"]
-        opt = ctx.user_data["new_prod_opt"]
+        name = text
         conn = get_db(); c = conn.cursor()
-        c.execute("INSERT INTO products (name, cost, opt_price, retail_price, in_stores) VALUES (?,?,?,?,1)", (name, cost, opt, retail))
+        c.execute("INSERT INTO products (name, cost, opt_price, retail_price, in_stores) VALUES (?, 0, 0, 0, 1)", (name,))
         conn.commit(); conn.close()
         ctx.user_data.clear()
-        await update.message.reply_text(f"✅ Товар «{name}» добавлен!", reply_markup=main_menu_kb(True))
+        await update.message.reply_text(f"✅ Товар «{name}» добавлен! Не забудь поменять ему цены через «✏️ Изменить цены».", reply_markup=main_menu_kb(True))
         return
 
-    # Админка - магазины
+    # Админка - изменение цен (себестоимость)
+    elif ctx.user_data.get("admin_state") == "edit_prod_cost":
+        ctx.user_data["edit_cost"] = float(text)
+        ctx.user_data["admin_state"] = "edit_prod_opt"
+        await update.message.reply_text("Введи НОВУЮ ОПТОВУЮ цену:")
+        return
+        
+    # Админка - изменение цен (опт)
+    elif ctx.user_data.get("admin_state") == "edit_prod_opt":
+        ctx.user_data["edit_opt"] = float(text)
+        ctx.user_data["admin_state"] = "edit_prod_retail"
+        await update.message.reply_text("Введи НОВУЮ РОЗНИЧНУЮ цену:")
+        return
+        
+    # Админка - изменение цен (розница и сохранение)
+    elif ctx.user_data.get("admin_state") == "edit_prod_retail":
+        retail = float(text)
+        prod = ctx.user_data["edit_prod"]
+        cost = ctx.user_data["edit_cost"]
+        opt = ctx.user_data["edit_opt"]
+        
+        conn = get_db(); c = conn.cursor()
+        c.execute("UPDATE products SET cost=?, opt_price=?, retail_price=? WHERE name=?", (cost, opt, retail, prod))
+        conn.commit(); conn.close()
+        ctx.user_data.clear()
+        await update.message.reply_text(f"✅ Цены для «{prod}» обновлены!", reply_markup=main_menu_kb(True))
+        return
+
+    # Админка - добавление магазина (имя)
     elif ctx.user_data.get("admin_state") == "add_store_name":
         ctx.user_data["new_store_name"] = text
         ctx.user_data["admin_state"] = "add_store_addr"
         await update.message.reply_text("Введи АДРЕС магазина:")
         return
+    # Админка - добавление магазина (адрес)
     elif ctx.user_data.get("admin_state") == "add_store_addr":
         name = ctx.user_data["new_store_name"]
         addr = text
@@ -391,7 +412,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif "buy_ing" in ctx.user_data:
         ing = ctx.user_data.pop("buy_ing")
         packs = qty
-        # Умный пересчет
         if ing in INGREDIENTS:
             total_weight = packs * INGREDIENTS[ing]["pack_weight"]
             INGREDIENTS[ing]["qty"] += total_weight
@@ -412,13 +432,10 @@ async def send_night_report(ctx: ContextTypes.DEFAULT_TYPE):
     for name, data in INGREDIENTS.items():
         text += f"• {name}: {data['qty']:.2f} {data['unit']}\n"
     try:
-        # Отправка пекарю
         msg = await ctx.bot.send_message(chat_id=BAKER_ID, text=text)
-        # Отчет тебе (Админу)
         await ctx.bot.send_message(chat_id=ADMIN_ID, text=f"📤 Отчет пекарю отправлен.\nСтатус: Доставлено (ID: {msg.message_id})")
     except Exception as e:
-        # Если пекарь заблокировал
-        await ctx.bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Ошибка! Пекарь не получил отчет. Возможно, она заблокировала бота. Детали: {e}")
+        await ctx.bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Ошибка! Пекарь не получил отчет. Детали: {e}")
 
 def main():
     init_db()
@@ -438,12 +455,13 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_menu, pattern="^admin_menu$"))
     app.add_handler(CallbackQueryHandler(admin_add_prod, pattern="^admin_add_prod$"))
     app.add_handler(CallbackQueryHandler(admin_add_store, pattern="^admin_add_store$"))
+    app.add_handler(CallbackQueryHandler(admin_edit_prices, pattern="^admin_edit_prices$"))
+    app.add_handler(CallbackQueryHandler(select_edit_product, pattern="^editprod_"))
     app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^main_menu$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     job_queue = app.job_queue
     if job_queue:
-        # Время по UTC. Для МСК 20:00 = 17:00 UTC. 
         job_queue.run_daily(send_night_report, time=datetime.strptime("17:00", "%H:%M").time())
 
     print("Финальный бот запущен!")
