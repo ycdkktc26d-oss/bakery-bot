@@ -14,7 +14,7 @@ TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E"
 ADMIN_ID = 7014970015  # ВАШ ID
 BAKER_ID = 8596668517 # ID пекаря
 
-# --- СКЛАД (Изначально ПУСТОЙ, ты сам заполнишь через "Закуп") ---
+# --- СКЛАД (Изначально ПУСТОЙ) ---
 INGREDIENTS = {
     "Мука": {"qty": 0.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 45.0},
     "Сахар": {"qty": 0.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 50.0},
@@ -28,7 +28,6 @@ INGREDIENTS = {
     "Шпажки": {"qty": 0.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 100.0},
 }
 
-# Бот УЖЕ ЗНАЕТ рецепты. Тебе не надо их вводить.
 RECIPES = {
     "Булочка сгущ.": {"Мука": 0.05, "Сахар": 0.01, "Дрожжи": 0.001, "Маргарин": 0.004, "Сгущенка": 0.01},
     "Пицца": {"Мука": 0.1, "Сосиски": 0.5, "Сыр": 0.025, "Томат": 0.005},
@@ -51,7 +50,6 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS leftovers
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
     
-    # Добавляем базовые продукты
     c.execute("SELECT count(*) FROM products")
     if c.fetchone()[0] == 0:
         prods = [
@@ -122,19 +120,15 @@ async def show_ship_keyboard(q, ctx):
     store = ctx.user_data["store"]
     data = ctx.user_data["ship_data"]
     conn = get_db(); c = conn.cursor()
-    
     if store == "Своя точка":
-        # На свою точку показываем ВСЕ товары
         c.execute("SELECT name FROM products")
     else:
-        # В магазины только привязанные
         c.execute("SELECT product_name FROM store_products WHERE store_name=?", (store,))
-        
     prods = [r[0] for r in c.fetchall()]
     conn.close()
     
     if not prods:
-        await q.edit_message_text("Тут пока нет товаров. Добавь их в Админке!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
+        await q.edit_message_text("Тут пока нет товаров!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
         return
 
     kb = []
@@ -164,7 +158,6 @@ async def finish_ship(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         c.execute("INSERT INTO shipments (store, product, qty, date) VALUES (?,?,?,?)", (store, prod, qty, today))
     conn.commit(); conn.close()
     
-    # Списание
     for prod, qty in data.items():
         if prod in RECIPES:
             for ing, amount in RECIPES[prod].items():
@@ -197,9 +190,9 @@ async def select_purchase(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ing = q.data.replace("buy_", "")
     ctx.user_data["buy_ing"] = ing
     pack = INGREDIENTS[ing]['pack_name']
-    await q.edit_message_text(f"Сколько {ing} привезли? (в {pack}ах)\nНапиши просто число:")
+    await q.edit_message_text(f"Сколько {ing} привезли? (в {pack}ах)")
 
-# --- ОСТАТКИ ---
+# --- ОСТАТКИ (НОВЫЙ ФОРМАТ) ---
 async def left_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     conn = get_db(); c = conn.cursor()
@@ -213,8 +206,7 @@ async def left_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def left_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     store = q.data.replace("leftstore_", "")
-    ctx.user_data.update({"store": store, "leftover": {}, "idx": 0, "mode": "leftover"})
-    ctx.user_data["left_products"] = []
+    ctx.user_data.update({"store": store, "leftover": {}})
     
     conn = get_db(); c = conn.cursor()
     if store == "Своя точка":
@@ -223,27 +215,62 @@ async def left_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         c.execute("SELECT product_name FROM store_products WHERE store_name=?", (store,))
     ctx.user_data["left_products"] = [r[0] for r in c.fetchall()]
     conn.close()
-    await ask_next_leftover(q, ctx)
+    await show_left_keyboard(q, ctx)
 
-async def ask_next_leftover(q, ctx):
-    idx = ctx.user_data["idx"]
-    avail = ctx.user_data["left_products"]
-    if idx >= len(avail):
-        await save_leftovers(q, ctx)
-        return
-    prod = avail[idx]
-    ctx.user_data["current_product"] = prod
-    await q.edit_message_text(f"Остаток «{prod}»:")
-
-async def save_leftovers(q, ctx):
-    conn = get_db(); c = conn.cursor()
-    today = str(date.today())
+async def show_left_keyboard(q, ctx):
     store = ctx.user_data["store"]
     data = ctx.user_data.get("leftover", {})
-    for prod, qty in data.items():
-        c.execute("INSERT INTO leftovers (store, product, qty, date) VALUES (?,?,?,?)", (store, prod, qty, today))
-    text = f"📊 Остатки в {store} записаны."
+    prods = ctx.user_data["left_products"]
+    
+    kb = []
+    for name in prods:
+        qty = data.get(name, "—")
+        kb.append([InlineKeyboardButton(f"{name}: {qty}", callback_data=f"setleft_{name}")])
+    kb.append([InlineKeyboardButton("✅ Сохранить остатки", callback_data="save_left")])
+    kb.append([InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")])
+    
+    class FQ:
+        async def edit_message_text(self, t, **kw): await q.message.reply_text(t, **kw)
+        async def answer(self): pass
+    await q.edit_message_text(f"📍 {store}\nЖми на товар и вводи остаток:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def set_leftover_qty(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    prod = q.data.replace("setleft_", "")
+    ctx.user_data["current_left_prod"] = prod
+    await q.edit_message_text(f"Введи остаток для «{prod}» (в штуках):")
+
+async def save_leftovers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    store = ctx.user_data["store"]
+    data = ctx.user_data.get("leftover", {})
+    conn = get_db(); c = conn.cursor()
+    today = str(date.today())
+    
+    text = f"📊 Остатки в {store} сохранены.\nИтог продаж за сегодня:\n"
+    total_rev = 0
+    total_prof = 0
+    
+    for prod in ctx.user_data["left_products"]:
+        left = data.get(prod, 0)
+        c.execute("INSERT INTO leftovers (store, product, qty, date) VALUES (?,?,?,?)", (store, prod, left, today))
+        
+        c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date=?", (store, prod, today))
+        shipped = c.fetchone()[0] or 0
+        sold = shipped - left
+        
+        if sold > 0:
+            c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
+            cost, opt, ret = c.fetchone()
+            price = ret if store == "Своя точка" else opt
+            rev = sold * price
+            prof = sold * (price - cost)
+            total_rev += rev
+            total_prof += prof
+            text += f"• {prod}: продано {sold} шт = {rev:.0f} руб (прибыль {prof:.0f} руб)\n"
+            
     conn.commit(); conn.close()
+    text += f"\n💰 Выручка: {total_rev:.0f} руб\n📈 Прибыль: {total_prof:.0f} руб"
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
     ctx.user_data.clear()
 
@@ -318,7 +345,7 @@ async def profit_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     filename = f"report_{today}.pdf"
     pdf.output(filename)
     
-    await q.message.reply_document(document=open(filename, "rb"), caption="💰 Отчет (Выручка + Чистая прибыль)")
+    await q.message.reply_document(document=open(filename, "rb"), caption="💰 Отчет")
     os.remove(filename)
     await q.edit_message_text("PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
 
@@ -351,7 +378,7 @@ async def admin_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conn.close()
     kb = [[InlineKeyboardButton(s, callback_data=f"linkstore_{s}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
-    await q.edit_message_text("Выбери магазин для привязки товаров:", reply_markup=InlineKeyboardMarkup(kb))
+    await q.edit_message_text("Выбери магазин:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def link_store_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -398,9 +425,27 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.user_data.get("admin_state")
     
     if state == "add_prod_name":
-        name = text
+        ctx.user_data["new_prod_name"] = text
+        ctx.user_data["admin_state"] = "add_prod_cost"
+        await update.message.reply_text("Введи СЕБЕСТОИМОСТЬ (например, 15.5):")
+        return
+    elif state == "add_prod_cost":
+        ctx.user_data["new_prod_cost"] = float(text)
+        ctx.user_data["admin_state"] = "add_prod_opt"
+        await update.message.reply_text("Введи ОПТОВУЮ цену:")
+        return
+    elif state == "add_prod_opt":
+        ctx.user_data["new_prod_opt"] = float(text)
+        ctx.user_data["admin_state"] = "add_prod_retail"
+        await update.message.reply_text("Введи РОЗНИЧНУЮ цену:")
+        return
+    elif state == "add_prod_retail":
+        retail = float(text)
+        name = ctx.user_data["new_prod_name"]
+        cost = ctx.user_data["new_prod_cost"]
+        opt = ctx.user_data["new_prod_opt"]
         conn = get_db(); c = conn.cursor()
-        c.execute("INSERT INTO products (name, cost, opt_price, retail_price) VALUES (?, 0, 0, 0)", (name,))
+        c.execute("INSERT INTO products (name, cost, opt_price, retail_price) VALUES (?,?,?,?)", (name, cost, opt, retail))
         conn.commit(); conn.close()
         ctx.user_data.clear()
         await update.message.reply_text(f"✅ Товар «{name}» добавлен!", reply_markup=main_menu_kb(True))
@@ -444,14 +489,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             INGREDIENTS[ing]["qty"] += total_weight
             await update.message.reply_text(f"✅ Закуплено {packs} {INGREDIENTS[ing]['pack_name']}.\nНа складе: {INGREDIENTS[ing]['qty']:.2f} {INGREDIENTS[ing]['unit']}", reply_markup=main_menu_kb(True))
 
-    elif "current_product" in ctx.user_data:
-        prod = ctx.user_data.pop("current_product")
-        if qty >= 0: ctx.user_data["leftover"][prod] = qty
-        ctx.user_data["idx"] += 1
+    elif "current_left_prod" in ctx.user_data:
+        prod = ctx.user_data.pop("current_left_prod")
+        ctx.user_data["leftover"][prod] = qty
         class FQ:
             async def edit_message_text(self, t, **kw): await update.message.reply_text(t, **kw)
             async def answer(self): pass
-        await ask_next_leftover(FQ(), ctx)
+        await show_left_keyboard(FQ(), ctx)
 
 # --- УВЕДОМЛЕНИЯ ---
 async def send_night_report(ctx: ContextTypes.DEFAULT_TYPE):
@@ -475,6 +519,8 @@ def main():
     app.add_handler(CallbackQueryHandler(finish_ship, pattern="^finish_ship$"))
     app.add_handler(CallbackQueryHandler(left_menu, pattern="^left$"))
     app.add_handler(CallbackQueryHandler(left_store, pattern="^leftstore_"))
+    app.add_handler(CallbackQueryHandler(set_leftover_qty, pattern="^setleft_"))
+    app.add_handler(CallbackQueryHandler(save_leftovers, pattern="^save_left$"))
     app.add_handler(CallbackQueryHandler(warehouse_menu, pattern="^warehouse$"))
     app.add_handler(CallbackQueryHandler(purchase_menu, pattern="^purchase$"))
     app.add_handler(CallbackQueryHandler(select_purchase, pattern="^buy_"))
