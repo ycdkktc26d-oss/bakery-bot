@@ -15,18 +15,18 @@ TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E"
 ADMIN_ID = 7014970015  # Твой ID
 BAKER_ID = 8596668517  # ID пекаря
 
-# --- СКЛАД ---
+# --- СКЛАД (Заполнен как было) ---
 INGREDIENTS = {
-    "Мука": {"qty": 0.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 45.0},
-    "Сахар": {"qty": 0.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 50.0},
-    "Дрожжи": {"qty": 0.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 0.5},
-    "Маргарин": {"qty": 0.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 0.1},
-    "Сгущенка": {"qty": 0.0, "unit": "кг", "pack_name": "банка", "pack_weight": 1.0},
-    "Сосиски": {"qty": 0.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 10.0},
-    "Сыр": {"qty": 0.0, "unit": "кг", "pack_name": "кг", "pack_weight": 1.0},
-    "Томат": {"qty": 0.0, "unit": "кг", "pack_name": "банка", "pack_weight": 0.7},
-    "Панировка": {"qty": 0.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 1.0},
-    "Шпажки": {"qty": 0.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 100.0},
+    "Мука": {"qty": 50.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 45.0},
+    "Сахар": {"qty": 20.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 50.0},
+    "Дрожжи": {"qty": 2.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 0.5},
+    "Маргарин": {"qty": 5.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 0.1},
+    "Сгущенка": {"qty": 20.0, "unit": "кг", "pack_name": "банка", "pack_weight": 1.0},
+    "Сосиски": {"qty": 100.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 10.0},
+    "Сыр": {"qty": 10.0, "unit": "кг", "pack_name": "кг", "pack_weight": 1.0},
+    "Томат": {"qty": 5.0, "unit": "кг", "pack_name": "банка", "pack_weight": 0.7},
+    "Панировка": {"qty": 3.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 1.0},
+    "Шпажки": {"qty": 100.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 100.0},
 }
 
 RECIPES = {
@@ -36,28 +36,44 @@ RECIPES = {
     "Сосиска шпаж.": {"Мука": 0.005, "Сосиски": 1.0, "Панировка": 0.01, "Шпажки": 1.0},
 }
 
-# --- БАЗА ДАННЫХ (СОЗДАЕТСЯ С НУЛЯ И ПУСТАЯ) ---
+# --- БАЗА ДАННЫХ (ВОЗВРАЩАЕМ ТОВАРЫ И МАГАЗИНЫ) ---
 def init_db():
     conn = sqlite3.connect("bakery.db")
     c = conn.cursor()
     
-    c.execute("DROP TABLE IF EXISTS products")
-    c.execute("DROP TABLE IF EXISTS stores")
-    c.execute("DROP TABLE IF EXISTS store_products")
-    c.execute("DROP TABLE IF EXISTS shipments")
-    c.execute("DROP TABLE IF EXISTS leftovers")
-    
-    c.execute("""CREATE TABLE products
+    # Таблицы
+    c.execute("""CREATE TABLE IF NOT EXISTS products
                  (id INTEGER PRIMARY KEY, name TEXT, cost REAL, opt_price REAL, retail_price REAL)""")
-    c.execute("""CREATE TABLE stores
+    c.execute("""CREATE TABLE IF NOT EXISTS stores
                  (id INTEGER PRIMARY KEY, name TEXT, address TEXT)""")
-    c.execute("""CREATE TABLE store_products
+    c.execute("""CREATE TABLE IF NOT EXISTS store_products
                  (store_name TEXT, product_name TEXT)""")
-    c.execute("""CREATE TABLE shipments
+    c.execute("""CREATE TABLE IF NOT EXISTS shipments
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
-    c.execute("""CREATE TABLE leftovers
+    c.execute("""CREATE TABLE IF NOT EXISTS leftovers
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
     
+    # Заполняем товары, если пусто
+    c.execute("SELECT count(*) FROM products")
+    if c.fetchone()[0] == 0:
+        prods = [
+            ("Булочка сгущ.", 4.69, 15, 20),
+            ("Хлеб дом.", 50, 0, 60),
+            ("Хлеб обыч.", 40, 0, 50),
+            ("Пончики", 25, 0, 50),
+            ("Пицца", 17.76, 55, 70),
+            ("Сосиска в тесте", 9.94, 25, 35),
+            ("Бургер", 60, 85, 100),
+            ("Сосиска шпаж.", 13.23, 0, 30),
+        ]
+        c.executemany("INSERT INTO products (name, cost, opt_price, retail_price) VALUES (?,?,?,?)", prods)
+        
+    # Заполняем магазины, если пусто
+    c.execute("SELECT count(*) FROM stores")
+    if c.fetchone()[0] == 0:
+        stores = [("Магазин 1", "ул. Ленина 1"), ("Магазин 2", "ул. Пушкина 2"), ("Своя точка", "Пекарня")]
+        c.executemany("INSERT INTO stores (name, address) VALUES (?,?)", stores)
+        
     conn.commit()
     conn.close()
 
@@ -79,7 +95,7 @@ def main_menu_kb(is_admin=False):
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_admin = (update.effective_user.id == ADMIN_ID)
-    await update.message.reply_text("🥖 Главное меню (База очищена, всё начинается с нуля):", reply_markup=main_menu_kb(is_admin))
+    await update.message.reply_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
 
 async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
