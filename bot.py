@@ -1,21 +1,14 @@
 import sqlite3
-import os
-import requests
-import urllib3
 from datetime import date, timedelta, datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from fpdf import FPDF
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- ВАШИ ДАННЫЕ ---
-# ВСТАВЬ СЮДА НОВЫЙ ТОКЕН, КОТОРЫЙ ДАСТ BOTFATHER ПОСЛЕ /revoke
 TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E" 
 ADMIN_ID = 7014970015  # Твой ID
 BAKER_ID = 8596668517  # ID пекаря
 
-# --- СКЛАД (Заполнен как было) ---
+# --- СКЛАД ---
 INGREDIENTS = {
     "Мука": {"qty": 50.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 45.0},
     "Сахар": {"qty": 20.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 50.0},
@@ -36,24 +29,24 @@ RECIPES = {
     "Сосиска шпаж.": {"Мука": 0.005, "Сосиски": 1.0, "Панировка": 0.01, "Шпажки": 1.0},
 }
 
-# --- БАЗА ДАННЫХ (ВОЗВРАЩАЕМ ТОВАРЫ И МАГАЗИНЫ) ---
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect("bakery.db")
     c = conn.cursor()
     
-    # Таблицы
     c.execute("""CREATE TABLE IF NOT EXISTS products
                  (id INTEGER PRIMARY KEY, name TEXT, cost REAL, opt_price REAL, retail_price REAL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS stores
                  (id INTEGER PRIMARY KEY, name TEXT, address TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS store_products
                  (store_name TEXT, product_name TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS store_prices
+                 (store_name TEXT, product_name TEXT, custom_price REAL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS shipments
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS leftovers
                  (id INTEGER PRIMARY KEY, store TEXT, product TEXT, qty INTEGER, date TEXT)""")
     
-    # Заполняем товары, если пусто
     c.execute("SELECT count(*) FROM products")
     if c.fetchone()[0] == 0:
         prods = [
@@ -68,7 +61,6 @@ def init_db():
         ]
         c.executemany("INSERT INTO products (name, cost, opt_price, retail_price) VALUES (?,?,?,?)", prods)
         
-    # Заполняем магазины, если пусто
     c.execute("SELECT count(*) FROM stores")
     if c.fetchone()[0] == 0:
         stores = [("Магазин 1", "ул. Ленина 1"), ("Магазин 2", "ул. Пушкина 2"), ("Своя точка", "Пекарня")]
@@ -103,18 +95,16 @@ async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_admin = (q.from_user.id == ADMIN_ID)
     await q.edit_message_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
 
-# --- СТАТИСТИКА ---
+# --- СТАТИСТИКА (ТЕКСТ) ---
 async def stats_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     kb = [
-        [InlineKeyboardButton("📊 На экране (Сегодня)", callback_data="stat_view_today")],
-        [InlineKeyboardButton("📊 На экране (За неделю)", callback_data="stat_view_week")],
-        [InlineKeyboardButton("📊 На экране (За месяц)", callback_data="stat_view_month")],
-        [InlineKeyboardButton("📄 Скачать PDF (Сегодня)", callback_data="rep_today")],
-        [InlineKeyboardButton("📄 Скачать PDF (За неделю)", callback_data="rep_week")],
+        [InlineKeyboardButton("📊 За сегодня", callback_data="stat_view_today")],
+        [InlineKeyboardButton("📊 За неделю", callback_data="stat_view_week")],
+        [InlineKeyboardButton("📊 За месяц", callback_data="stat_view_month")],
         [InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]
     ]
-    await q.edit_message_text("📈 Выбери формат статистики:", reply_markup=InlineKeyboardMarkup(kb))
+    await q.edit_message_text("📈 Выбери период:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def show_stats_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_date: str, end_date: str, title: str):
     q = update.callback_query
@@ -149,7 +139,16 @@ async def show_stats_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_
                     res = c.fetchone()
                     if res:
                         cost, opt, ret = res
-                        price = ret if store == "Своя точка" else opt
+                        
+                        # Проверка индивидуальной цены
+                        c.execute("SELECT custom_price FROM store_prices WHERE store_name=? AND product_name=?", (store, prod))
+                        custom = c.fetchone()
+                        
+                        if custom:
+                            price = custom[0]
+                        else:
+                            price = ret if store == "Своя точка" else opt
+                            
                         rev = sold * price
                         prof = sold * (price - cost)
                         store_rev += rev
@@ -180,94 +179,6 @@ async def stat_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     start = str(date.today() - timedelta(days=30))
     end = str(date.today())
     await show_stats_text(update, ctx, start, end, "За месяц")
-
-# --- PDF ОТЧЕТ ---
-async def generate_pdf_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_date: str, end_date: str, title: str):
-    q = update.callback_query
-    await q.edit_message_text("⏳ Собираю данные и создаю PDF...")
-    
-    conn = get_db(); c = conn.cursor()
-    total_revenue = 0
-    total_profit = 0
-    rows = []
-    
-    c.execute("SELECT DISTINCT store FROM shipments WHERE date BETWEEN ? AND ?", (start_date, end_date))
-    stores = [r[0] for r in c.fetchall()]
-    
-    for store in stores:
-        c.execute("SELECT DISTINCT product FROM shipments WHERE store=? AND date BETWEEN ? AND ?", (store, start_date, end_date))
-        prods = [r[0] for r in c.fetchall()]
-        for prod in prods:
-            c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
-            shipped = c.fetchone()[0] or 0
-            c.execute("SELECT SUM(qty) FROM leftovers WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
-            left = c.fetchone()[0] or 0
-            sold = shipped - left
-            if sold > 0:
-                c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
-                res = c.fetchone()
-                if res:
-                    cost, opt, ret = res
-                    price = ret if store == "Своя точка" else opt
-                    rev = sold * price
-                    prof = sold * (price - cost)
-                    total_revenue += rev
-                    total_profit += prof
-                    rows.append((store, prod, sold, rev, prof))
-    conn.close()
-    
-    font_path = "DejaVuSans.ttf"
-    if not os.path.exists(font_path):
-        url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
-        r = requests.get(url, verify=False)
-        with open(font_path, "wb") as f:
-            f.write(r.content)
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.add_font("DejaVu", "", font_path, uni=True)
-    pdf.set_font("DejaVu", size=14)
-    pdf.cell(0, 10, f"Отчет: {title}", ln=True, align='C')
-    pdf.set_font("DejaVu", size=10)
-    pdf.cell(0, 10, f"Период: {start_date} - {end_date}", ln=True, align='C')
-    pdf.ln(5)
-    
-    pdf.set_font("DejaVu", size=9)
-    pdf.cell(35, 8, "Точка", 1)
-    pdf.cell(45, 8, "Товар", 1)
-    pdf.cell(15, 8, "Шт", 1)
-    pdf.cell(35, 8, "Выручка", 1)
-    pdf.cell(35, 8, "Прибыль", 1)
-    pdf.ln()
-    
-    for r in rows:
-        pdf.cell(35, 8, str(r[0])[:15], 1)
-        pdf.cell(45, 8, str(r[1])[:20], 1)
-        pdf.cell(15, 8, str(r[2]), 1)
-        pdf.cell(35, 8, f"{r[3]:.0f} руб", 1)
-        pdf.cell(35, 8, f"{r[4]:.0f} руб", 1)
-        pdf.ln()
-        
-    pdf.ln(5)
-    pdf.set_font("DejaVu", size=12)
-    pdf.cell(0, 10, f"ВЫРУЧКА: {total_revenue:.0f} руб", ln=True)
-    pdf.cell(0, 10, f"ЧИСТАЯ ПРИБЫЛЬ: {total_profit:.0f} руб", ln=True)
-    
-    filename = f"report_{start_date}_{end_date}.pdf"
-    pdf.output(filename)
-    
-    await q.message.reply_document(document=open(filename, "rb"), caption=f"💰 Отчет: {title}")
-    os.remove(filename)
-    await q.edit_message_text("✅ PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="stats_menu")]]))
-
-async def report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    today = str(date.today())
-    await generate_pdf_report(update, ctx, today, today, "За сегодня")
-
-async def report_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    start = str(date.today() - timedelta(days=7))
-    end = str(date.today())
-    await generate_pdf_report(update, ctx, start, end, "За неделю")
 
 # --- ОТГРУЗКА ---
 async def ship_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -445,7 +356,15 @@ async def save_leftovers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             res = c.fetchone()
             if res:
                 cost, opt, ret = res
-                price = ret if store == "Своя точка" else opt
+                
+                c.execute("SELECT custom_price FROM store_prices WHERE store_name=? AND product_name=?", (store, prod))
+                custom = c.fetchone()
+                
+                if custom:
+                    price = custom[0]
+                else:
+                    price = ret if store == "Своя точка" else opt
+                    
                 rev = sold * price
                 prof = sold * (price - cost)
                 total_rev += rev
@@ -463,9 +382,11 @@ async def admin_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("➕ Добавить товар", callback_data="admin_add_prod")],
         [InlineKeyboardButton("✏️ Редактировать товар", callback_data="admin_edit_prod_list")],
+        [InlineKeyboardButton("🗑 Удалить товар", callback_data="admin_del_prod_list")],
         [InlineKeyboardButton("➕ Добавить магазин", callback_data="admin_add_store")],
         [InlineKeyboardButton("✏️ Редактировать магазин", callback_data="admin_edit_store_list")],
         [InlineKeyboardButton("🔗 Привязать товары", callback_data="admin_link")],
+        [InlineKeyboardButton("💰 Индивид. цены", callback_data="admin_custom_prices")],
         [InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]
     ]
     await q.edit_message_text("⚙️ Админка:", reply_markup=InlineKeyboardMarkup(kb))
@@ -480,7 +401,8 @@ async def admin_add_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["admin_state"] = "add_store_name"
     await q.edit_message_text("Введи НАЗВАНИЕ магазина:")
 
-async def admin_edit_prod_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# --- УДАЛЕНИЕ ТОВАРА ---
+async def admin_del_prod_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     conn = get_db(); c = conn.cursor()
     c.execute("SELECT name FROM products")
@@ -489,6 +411,60 @@ async def admin_edit_prod_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not prods:
         await q.edit_message_text("Товаров нет.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
         return
+    kb = [[InlineKeyboardButton(f"🗑 {p}", callback_data=f"delprod_{p}")] for p in prods]
+    kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
+    await q.edit_message_text("Выбери товар для УДАЛЕНИЯ:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def del_product_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    prod = q.data.replace("delprod_", "")
+    conn = get_db(); c = conn.cursor()
+    c.execute("DELETE FROM products WHERE name=?", (prod,))
+    c.execute("DELETE FROM store_products WHERE product_name=?", (prod,))
+    c.execute("DELETE FROM store_prices WHERE product_name=?", (prod,))
+    conn.commit(); conn.close()
+    await q.edit_message_text(f"✅ Товар «{prod}» удален навсегда!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ В Админку", callback_data="admin_menu")]]))
+
+# --- ИНДИВИДУАЛЬНЫЕ ЦЕНЫ ---
+async def admin_custom_prices(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT name FROM stores WHERE name != 'Своя точка'")
+    stores = [r[0] for r in c.fetchall()]
+    conn.close()
+    if not stores:
+        await q.edit_message_text("Нет магазинов.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
+        return
+    kb = [[InlineKeyboardButton(s, callback_data=f"customstore_{s}")] for s in stores]
+    kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
+    await q.edit_message_text("Выбери магазин для индивидуальной цены:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def custom_price_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    store = q.data.replace("customstore_", "")
+    ctx.user_data["custom_price_store"] = store
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT name FROM products")
+    prods = [r[0] for r in c.fetchall()]
+    conn.close()
+    kb = [[InlineKeyboardButton(p, callback_data=f"customprod_{p}")] for p in prods]
+    kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_custom_prices")])
+    await q.edit_message_text(f"Магазин: {store}\nВыбери товар:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def custom_price_prod(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    prod = q.data.replace("customprod_", "")
+    ctx.user_data["custom_price_prod"] = prod
+    ctx.user_data["admin_state"] = "set_custom_price"
+    await q.edit_message_text(f"Введи новую цену для «{prod}» в магазине {ctx.user_data['custom_price_store']}:")
+
+# --- РЕДАКТИРОВАНИЕ ТОВАРА/МАГАЗИНА ---
+async def admin_edit_prod_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT name FROM products")
+    prods = [r[0] for r in c.fetchall()]
+    conn.close()
     kb = [[InlineKeyboardButton(p, callback_data=f"editprod_{p}")] for p in prods]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
     await q.edit_message_text("Выбери товар для редактирования:", reply_markup=InlineKeyboardMarkup(kb))
@@ -496,13 +472,10 @@ async def admin_edit_prod_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def admin_edit_store_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     conn = get_db(); c = conn.cursor()
-    c.execute("SELECT name, address FROM stores")
-    stores = c.fetchall()
+    c.execute("SELECT name FROM stores")
+    stores = [r[0] for r in c.fetchall()]
     conn.close()
-    if not stores:
-        await q.edit_message_text("Магазинов нет.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
-        return
-    kb = [[InlineKeyboardButton(f"{s[0]}", callback_data=f"editstore_{s[0]}")] for s in stores]
+    kb = [[InlineKeyboardButton(f"{s}", callback_data=f"editstore_{s}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
     await q.edit_message_text("Выбери магазин для редактирования:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -511,24 +484,22 @@ async def select_edit_prod(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     prod = q.data.replace("editprod_", "")
     ctx.user_data["edit_prod"] = prod
     ctx.user_data["admin_state"] = "edit_prod_name"
-    await q.edit_message_text(f"Товар «{prod}».\nВведи НОВОЕ название (или напиши то же самое):")
+    await q.edit_message_text(f"Товар «{prod}».\nВведи НОВОЕ название (или то же самое):")
 
 async def select_edit_store(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     store = q.data.replace("editstore_", "")
     ctx.user_data["edit_store"] = store
     ctx.user_data["admin_state"] = "edit_store_name"
-    await q.edit_message_text(f"Магазин «{store}».\nВведи НОВОЕ название (или напиши то же самое):")
+    await q.edit_message_text(f"Магазин «{store}».\nВведи НОВОЕ название:")
 
+# --- ПРИВЯЗКА ТОВАРОВ (И ОТВЯЗКА) ---
 async def admin_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     conn = get_db(); c = conn.cursor()
     c.execute("SELECT name FROM stores")
     stores = [r[0] for r in c.fetchall()]
     conn.close()
-    if not stores:
-        await q.edit_message_text("Сначала добавь магазины.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")]]))
-        return
     kb = [[InlineKeyboardButton(s, callback_data=f"linkstore_{s}")] for s in stores]
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin_menu")])
     await q.edit_message_text("Выбери магазин:", reply_markup=InlineKeyboardMarkup(kb))
@@ -548,10 +519,6 @@ async def show_link_keyboard(q, ctx):
     linked = [r[0] for r in c.fetchall()]
     conn.close()
     
-    if not prods:
-        await q.edit_message_text("Сначала добавь товары.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_link")]]))
-        return
-    
     kb = []
     for p in prods:
         mark = "✅ " if p in linked else "❌ "
@@ -561,7 +528,7 @@ async def show_link_keyboard(q, ctx):
     class FQ:
         async def edit_message_text(self, t, **kw): await q.message.reply_text(t, **kw)
         async def answer(self): pass
-    await q.edit_message_text(f"Магазин: {store}\nЖми, чтобы вкл/выкл:", reply_markup=InlineKeyboardMarkup(kb))
+    await q.edit_message_text(f"Магазин: {store}\nЖми на товар, чтобы привязать/отвязать:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def toggle_product(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -584,7 +551,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if state == "add_prod_name":
         ctx.user_data["new_prod_name"] = text
         ctx.user_data["admin_state"] = "add_prod_cost"
-        await update.message.reply_text("Введи СЕБЕСТОИМОСТЬ (например, 15.5):")
+        await update.message.reply_text("Введи СЕБЕСТОИМОСТЬ:")
         return
     elif state == "add_prod_cost":
         ctx.user_data["new_prod_cost"] = float(text)
@@ -608,7 +575,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Товар «{name}» добавлен!", reply_markup=main_menu_kb(True))
         return
         
-    # РЕДАКТИРОВАНИЕ ТОВАРА
     elif state == "edit_prod_name":
         ctx.user_data["edit_new_name"] = text
         ctx.user_data["admin_state"] = "edit_prod_cost"
@@ -637,7 +603,17 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Товар обновлен!", reply_markup=main_menu_kb(True))
         return
 
-    # ДОБАВЛЕНИЕ МАГАЗИНА
+    elif state == "set_custom_price":
+        price = float(text)
+        store = ctx.user_data["custom_price_store"]
+        prod = ctx.user_data["custom_price_prod"]
+        conn = get_db(); c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO store_prices (store_name, product_name, custom_price) VALUES (?,?,?)", (store, prod, price))
+        conn.commit(); conn.close()
+        ctx.user_data.clear()
+        await update.message.reply_text(f"✅ Цена {price} установлена для «{prod}» в {store}!", reply_markup=main_menu_kb(True))
+        return
+
     elif state == "add_store_name":
         ctx.user_data["new_store_name"] = text
         ctx.user_data["admin_state"] = "add_store_addr"
@@ -653,7 +629,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Магазин «{name}» добавлен!", reply_markup=main_menu_kb(True))
         return
         
-    # РЕДАКТИРОВАНИЕ МАГАЗИНА
     elif state == "edit_store_name":
         ctx.user_data["edit_new_store_name"] = text
         ctx.user_data["admin_state"] = "edit_store_addr"
@@ -729,18 +704,19 @@ def main():
     app.add_handler(CallbackQueryHandler(purchase_menu, pattern="^purchase$"))
     app.add_handler(CallbackQueryHandler(select_purchase, pattern="^buy_"))
     
-    # Статистика и отчеты
     app.add_handler(CallbackQueryHandler(stats_menu, pattern="^stats_menu$"))
     app.add_handler(CallbackQueryHandler(stat_today, pattern="^stat_view_today$"))
     app.add_handler(CallbackQueryHandler(stat_week, pattern="^stat_view_week$"))
     app.add_handler(CallbackQueryHandler(stat_month, pattern="^stat_view_month$"))
-    app.add_handler(CallbackQueryHandler(report_today, pattern="^rep_today$"))
-    app.add_handler(CallbackQueryHandler(report_week, pattern="^rep_week$"))
     
-    # Админка
     app.add_handler(CallbackQueryHandler(admin_menu, pattern="^admin_menu$"))
     app.add_handler(CallbackQueryHandler(admin_add_prod, pattern="^admin_add_prod$"))
     app.add_handler(CallbackQueryHandler(admin_add_store, pattern="^admin_add_store$"))
+    app.add_handler(CallbackQueryHandler(admin_del_prod_list, pattern="^admin_del_prod_list$"))
+    app.add_handler(CallbackQueryHandler(del_product_confirm, pattern="^delprod_"))
+    app.add_handler(CallbackQueryHandler(admin_custom_prices, pattern="^admin_custom_prices$"))
+    app.add_handler(CallbackQueryHandler(custom_price_store, pattern="^customstore_"))
+    app.add_handler(CallbackQueryHandler(custom_price_prod, pattern="^customprod_"))
     app.add_handler(CallbackQueryHandler(admin_edit_prod_list, pattern="^admin_edit_prod_list$"))
     app.add_handler(CallbackQueryHandler(admin_edit_store_list, pattern="^admin_edit_store_list$"))
     app.add_handler(CallbackQueryHandler(select_edit_prod, pattern="^editprod_"))
@@ -755,7 +731,7 @@ def main():
     if job_queue:
         job_queue.run_daily(send_night_report, time=datetime.strptime("17:00", "%H:%M").time())
 
-    print("Бот запущен!")
+    print("Бот запущен без PDF! Все фишки добавлены.")
     app.run_polling()
 
 if __name__ == "__main__":
