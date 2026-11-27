@@ -6,8 +6,12 @@ from datetime import date, timedelta, datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from fpdf import FPDF
+import requests
+import urllib3
 
-# --- ЗАГЛУШКА ДЛЯ RAILWAY (чтобы сервер не выключал бота) ---
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- ЗАГЛУШКА ДЛЯ RAILWAY ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -19,36 +23,13 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# Запускаем заглушку в фоне
 threading.Thread(target=run_health_server, daemon=True).start()
 # -----------------------------------------------------------
 
 # --- ВАШИ ДАННЫЕ ---
-# ВСТАВЬ НОВЫЙ ТОКЕН (после /revoke)
 TOKEN = "9292282503:AAGTBe4jryIjP_XrU1OjZQgCD-XWDP3xo-E" 
 ADMIN_ID = 7014970015  # Твой ID
 BAKER_ID = 8596668517  # ID пекаря
-
-# --- СКЛАД ---
-INGREDIENTS = {
-    "Мука": {"qty": 50.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 45.0},
-    "Сахар": {"qty": 20.0, "unit": "кг", "pack_name": "мешок", "pack_weight": 50.0},
-    "Дрожжи": {"qty": 2.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 0.5},
-    "Маргарин": {"qty": 5.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 0.1},
-    "Сгущенка": {"qty": 20.0, "unit": "кг", "pack_name": "банка", "pack_weight": 1.0},
-    "Сосиски": {"qty": 100.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 10.0},
-    "Сыр": {"qty": 10.0, "unit": "кг", "pack_name": "кг", "pack_weight": 1.0},
-    "Томат": {"qty": 5.0, "unit": "кг", "pack_name": "банка", "pack_weight": 0.7},
-    "Панировка": {"qty": 3.0, "unit": "кг", "pack_name": "пачка", "pack_weight": 1.0},
-    "Шпажки": {"qty": 100.0, "unit": "шт", "pack_name": "пачка", "pack_weight": 100.0},
-}
-
-RECIPES = {
-    "Булочка сгущ.": {"Мука": 0.05, "Сахар": 0.01, "Дрожжи": 0.001, "Маргарин": 0.004, "Сгущенка": 0.01},
-    "Пицца": {"Мука": 0.1, "Сосиски": 0.5, "Сыр": 0.025, "Томат": 0.005},
-    "Сосиска в тесте": {"Мука": 0.05, "Сосиски": 1.0},
-    "Сосиска шпаж.": {"Мука": 0.005, "Сосиски": 1.0, "Панировка": 0.01, "Шпажки": 1.0},
-}
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -95,8 +76,6 @@ def main_menu_kb(is_admin=False):
     kb = [
         [InlineKeyboardButton("📦 Отгрузить товар (Водитель)", callback_data="ship")],
         [InlineKeyboardButton("📊 Ввести остаток", callback_data="left")],
-        [InlineKeyboardButton("📚 Склад (Сырье)", callback_data="warehouse")],
-        [InlineKeyboardButton("🚚 Закуп (Приход)", callback_data="purchase")],
     ]
     if is_admin:
         kb.append([InlineKeyboardButton("📈 Статистика", callback_data="stats_menu")])
@@ -191,6 +170,94 @@ async def stat_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     end = str(date.today())
     await show_stats_text(update, ctx, start, end, "За месяц")
 
+# --- PDF ОТЧЕТ ---
+async def generate_pdf_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE, start_date: str, end_date: str, title: str):
+    q = update.callback_query
+    await q.edit_message_text("⏳ Собираю данные и создаю PDF...")
+    
+    conn = get_db(); c = conn.cursor()
+    total_revenue = 0
+    total_profit = 0
+    rows = []
+    
+    c.execute("SELECT DISTINCT store FROM shipments WHERE date BETWEEN ? AND ?", (start_date, end_date))
+    stores = [r[0] for r in c.fetchall()]
+    
+    for store in stores:
+        c.execute("SELECT DISTINCT product FROM shipments WHERE store=? AND date BETWEEN ? AND ?", (store, start_date, end_date))
+        prods = [r[0] for r in c.fetchall()]
+        for prod in prods:
+            c.execute("SELECT SUM(qty) FROM shipments WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
+            shipped = c.fetchone()[0] or 0
+            c.execute("SELECT SUM(qty) FROM leftovers WHERE store=? AND product=? AND date BETWEEN ? AND ?", (store, prod, start_date, end_date))
+            left = c.fetchone()[0] or 0
+            sold = shipped - left
+            if sold > 0:
+                c.execute("SELECT cost, opt_price, retail_price FROM products WHERE name=?", (prod,))
+                res = c.fetchone()
+                if res:
+                    cost, opt, ret = res
+                    price = ret if store == "Своя точка" else opt
+                    rev = sold * price
+                    prof = sold * (price - cost)
+                    total_revenue += rev
+                    total_profit += prof
+                    rows.append((store, prod, sold, rev, prof))
+    conn.close()
+    
+    font_path = "DejaVuSans.ttf"
+    if not os.path.exists(font_path):
+        url = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+        r = requests.get(url, verify=False)
+        with open(font_path, "wb") as f:
+            f.write(r.content)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("DejaVu", "", font_path, uni=True)
+    pdf.set_font("DejaVu", size=14)
+    pdf.cell(0, 10, f"Отчет: {title}", ln=True, align='C')
+    pdf.set_font("DejaVu", size=10)
+    pdf.cell(0, 10, f"Период: {start_date} - {end_date}", ln=True, align='C')
+    pdf.ln(5)
+    
+    pdf.set_font("DejaVu", size=9)
+    pdf.cell(35, 8, "Точка", 1)
+    pdf.cell(45, 8, "Товар", 1)
+    pdf.cell(15, 8, "Шт", 1)
+    pdf.cell(35, 8, "Выручка", 1)
+    pdf.cell(35, 8, "Прибыль", 1)
+    pdf.ln()
+    
+    for r in rows:
+        pdf.cell(35, 8, str(r[0])[:15], 1)
+        pdf.cell(45, 8, str(r[1])[:20], 1)
+        pdf.cell(15, 8, str(r[2]), 1)
+        pdf.cell(35, 8, f"{r[3]:.0f} руб", 1)
+        pdf.cell(35, 8, f"{r[4]:.0f} руб", 1)
+        pdf.ln()
+        
+    pdf.ln(5)
+    pdf.set_font("DejaVu", size=12)
+    pdf.cell(0, 10, f"ВЫРУЧКА: {total_revenue:.0f} руб", ln=True)
+    pdf.cell(0, 10, f"ЧИСТАЯ ПРИБЫЛЬ: {total_profit:.0f} руб", ln=True)
+    
+    filename = f"report_{start_date}_{end_date}.pdf"
+    pdf.output(filename)
+    
+    await q.message.reply_document(document=open(filename, "rb"), caption=f"💰 Отчет: {title}")
+    os.remove(filename)
+    await q.edit_message_text("✅ PDF сформирован!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="stats_menu")]]))
+
+async def report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    today = str(date.today())
+    await generate_pdf_report(update, ctx, today, today, "За сегодня")
+
+async def report_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    start = str(date.today() - timedelta(days=7))
+    end = str(date.today())
+    await generate_pdf_report(update, ctx, start, end, "За неделю")
+
 # --- ОТГРУЗКА ---
 async def ship_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -254,39 +321,9 @@ async def finish_ship(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         c.execute("INSERT INTO shipments (store, product, qty, date) VALUES (?,?,?,?)", (store, prod, qty, today))
     conn.commit(); conn.close()
     
-    for prod, qty in data.items():
-        if prod in RECIPES:
-            for ing, amount in RECIPES[prod].items():
-                if ing in INGREDIENTS:
-                    INGREDIENTS[ing]["qty"] -= (amount * qty)
-    
     text = f"✅ Отгружено в {store}:\n" + "\n".join(f"• {k}: {v} шт" for k, v in data.items())
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
     ctx.user_data.clear()
-
-# --- СКЛАД ---
-async def warehouse_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    text = "📚 Остатки на складе:\n\n"
-    for name, data in INGREDIENTS.items():
-        text += f"• {name}: {data['qty']:.2f} {data['unit']}\n"
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")]]))
-
-# --- ЗАКУП ---
-async def purchase_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    kb = []
-    for name, data in INGREDIENTS.items():
-        kb.append([InlineKeyboardButton(f"{name} ({data['qty']:.1f} {data['unit']})", callback_data=f"buy_{name}")])
-    kb.append([InlineKeyboardButton("⬅️ Меню", callback_data="main_menu")])
-    await q.edit_message_text("Что закупаем?", reply_markup=InlineKeyboardMarkup(kb))
-
-async def select_purchase(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    ing = q.data.replace("buy_", "")
-    ctx.user_data["buy_ing"] = ing
-    pack = INGREDIENTS[ing]['pack_name']
-    await q.edit_message_text(f"Сколько {ing} привезли? (в {pack}ах)")
 
 # --- ОСТАТКИ ---
 async def left_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -605,12 +642,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_ship_keyboard(FQ(), ctx)
     
     elif "buy_ing" in ctx.user_data:
-        ing = ctx.user_data.pop("buy_ing")
-        packs = qty
-        if ing in INGREDIENTS:
-            total_weight = packs * INGREDIENTS[ing]["pack_weight"]
-            INGREDIENTS[ing]["qty"] += total_weight
-            await update.message.reply_text(f"✅ Закуплено {packs} {INGREDIENTS[ing]['pack_name']}.\nНа складе: {INGREDIENTS[ing]['qty']:.2f} {INGREDIENTS[ing]['unit']}", reply_markup=main_menu_kb(True))
+        # Заглушка, так как склада больше нет
+        ctx.user_data.pop("buy_ing")
 
     elif "current_left_prod" in ctx.user_data:
         prod = ctx.user_data.pop("current_left_prod")
@@ -622,9 +655,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- УВЕДОМЛЕНИЯ ---
 async def send_night_report(ctx: ContextTypes.DEFAULT_TYPE):
-    text = "🌙 Остатки на завтра (склад):\n\n"
-    for name, data in INGREDIENTS.items():
-        text += f"• {name}: {data['qty']:.2f} {data['unit']}\n"
+    text = "🌙 Ночной отчет (готово к работе)."
     try:
         msg = await ctx.bot.send_message(chat_id=BAKER_ID, text=text)
         await ctx.bot.send_message(chat_id=ADMIN_ID, text=f"📤 Отчет пекарю отправлен.")
@@ -644,14 +675,13 @@ def main():
     app.add_handler(CallbackQueryHandler(left_store, pattern="^leftstore_"))
     app.add_handler(CallbackQueryHandler(set_leftover_qty, pattern="^setleft_"))
     app.add_handler(CallbackQueryHandler(save_leftovers, pattern="^save_left$"))
-    app.add_handler(CallbackQueryHandler(warehouse_menu, pattern="^warehouse$"))
-    app.add_handler(CallbackQueryHandler(purchase_menu, pattern="^purchase$"))
-    app.add_handler(CallbackQueryHandler(select_purchase, pattern="^buy_"))
     
     app.add_handler(CallbackQueryHandler(stats_menu, pattern="^stats_menu$"))
     app.add_handler(CallbackQueryHandler(stat_today, pattern="^stat_view_today$"))
     app.add_handler(CallbackQueryHandler(stat_week, pattern="^stat_view_week$"))
     app.add_handler(CallbackQueryHandler(stat_month, pattern="^stat_view_month$"))
+    app.add_handler(CallbackQueryHandler(report_today, pattern="^rep_today$"))
+    app.add_handler(CallbackQueryHandler(report_week, pattern="^rep_week$"))
     
     app.add_handler(CallbackQueryHandler(admin_menu, pattern="^admin_menu$"))
     app.add_handler(CallbackQueryHandler(admin_add_prod, pattern="^admin_add_prod$"))
