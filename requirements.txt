@@ -1,3 +1,1 @@
 python-telegram-bot[job-queue]
-fpdf2
-requests
