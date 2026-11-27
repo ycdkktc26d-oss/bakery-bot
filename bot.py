@@ -56,16 +56,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_admin = (update.effective_user.id == ADMIN_ID)
     await update.message.reply_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
 
-async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    conn = get_db(); c = conn.cursor()
-    c.execute("DELETE FROM shipments")
-    c.execute("DELETE FROM leftovers")
-    conn.commit(); conn.close()
-    await update.message.reply_text("🗑 Все продажи и остатки сброшены!")
-
 async def main_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
+    q = update.callback_query; await q.answer() # Мгновенный ответ!
     ctx.user_data.clear()
     is_admin = (q.from_user.id == ADMIN_ID)
     await q.edit_message_text("🥖 Главное меню:", reply_markup=main_menu_kb(is_admin))
@@ -367,7 +359,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.replace(",", ".")
     state = ctx.user_data.get("admin_state")
     
-    # Если бот ничего не ждет - молчим (убрали ошибку "введи число")
+    # Если бот ничего не ждет - молчим
     if not state and "current_prod" not in ctx.user_data and "current_left_prod" not in ctx.user_data:
         return
 
@@ -409,7 +401,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Магазин «{text}» добавлен!", reply_markup=main_menu_kb(True))
         return
 
-    # Ввод цифр (Отгрузка, Остатки)
     try:
         qty = float(text) if "." in text else int(text)
     except:
